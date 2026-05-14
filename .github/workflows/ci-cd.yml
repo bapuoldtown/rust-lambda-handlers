@@ -6,17 +6,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # lets you manually trigger from Actions tab
+  workflow_dispatch:  # lets you manually trigger from the Actions tab
 
 # OIDC requires id-token: write permission
 permissions:
   id-token: write
   contents: read
 
-# Cancel old runs on same branch — saves CI minutes
+# Cancel old runs on the same branch — saves CI minutes
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
   # ============================================================
@@ -31,6 +35,7 @@ jobs:
       - name: Install Rust + cargo-lambda
         uses: moonrepo/setup-rust@v1
         with:
+          components: rustfmt, clippy
           bins: cargo-lambda
           cache-target: release
 
@@ -39,25 +44,44 @@ jobs:
         with:
           version: 0.14.0
 
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Build for ARM64 Graviton
         run: cargo lambda build --arm64 --release
+
+      # 🔍 Debug step — prints where cargo-lambda actually put the binary.
+      # Keep this for now so we can verify the path if the next step fails.
+      - name: Find the bootstrap binary
+        run: |
+          echo "=== target/lambda directory ==="
+          ls -la target/lambda/ || echo "target/lambda not found"
+          echo ""
+          echo "=== Searching for bootstrap files ==="
+          find target -name "bootstrap" -type f 2>/dev/null || echo "no bootstrap found"
 
       - name: Upload bootstrap artifact
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap
-          path: target/lambda/hello-lambda/bootstrap
+          # cargo-lambda outputs to target/lambda/<bin-name>/bootstrap
+          # Our Cargo.toml sets [[bin]] name = "bootstrap", so:
+          path: target/lambda/bootstrap/bootstrap
           if-no-files-found: error
           retention-days: 7
 
   # ============================================================
-  # JOB 2: Deploy to AWS Lambda (ONLY on push to main)
+  # JOB 2: Deploy to AWS Lambda (ONLY on push to main, NOT on PRs)
   # ============================================================
   deploy:
     name: Deploy to AWS Lambda
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     steps:
       - name: Download bootstrap artifact
         uses: actions/download-artifact@v4
@@ -69,6 +93,7 @@ jobs:
         run: |
           chmod +x bootstrap
           zip -j hello-lambda.zip bootstrap
+          ls -la hello-lambda.zip
 
       - name: Authenticate to AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
