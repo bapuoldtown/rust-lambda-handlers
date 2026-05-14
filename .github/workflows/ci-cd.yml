@@ -19,6 +19,8 @@ jobs:
           bins: cargo-lambda
 
       - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.11.0
 
       - run: cargo lambda build --arm64 --release --output-format zip
 
