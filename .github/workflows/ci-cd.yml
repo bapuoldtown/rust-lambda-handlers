@@ -1,0 +1,95 @@
+name: CI/CD
+
+# WHEN to run
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # lets you manually trigger from Actions tab
+
+# OIDC requires id-token: write permission
+permissions:
+  id-token: write
+  contents: read
+
+# Cancel old runs on same branch — saves CI minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # JOB 1: Build the Rust binary for ARM64 Lambda
+  # ============================================================
+  build:
+    name: Build (ARM64 Lambda)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + cargo-lambda
+        uses: moonrepo/setup-rust@v1
+        with:
+          bins: cargo-lambda
+          cache-target: release
+
+      - name: Install Zig (needed by cargo-lambda)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.0
+
+      - name: Build for ARM64 Graviton
+        run: cargo lambda build --arm64 --release
+
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap
+          path: target/lambda/hello-lambda/bootstrap
+          if-no-files-found: error
+          retention-days: 7
+
+  # ============================================================
+  # JOB 2: Deploy to AWS Lambda (ONLY on push to main)
+  # ============================================================
+  deploy:
+    name: Deploy to AWS Lambda
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Download bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap
+          path: .
+
+      - name: Make executable and zip
+        run: |
+          chmod +x bootstrap
+          zip -j hello-lambda.zip bootstrap
+
+      - name: Authenticate to AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: github-actions-${{ github.run_id }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Update Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name hello-lambda \
+            --zip-file fileb://hello-lambda.zip \
+            --publish \
+            --output table
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name hello-lambda
+          echo "✅ Lambda deployed successfully"
